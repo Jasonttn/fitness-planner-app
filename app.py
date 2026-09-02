@@ -103,18 +103,18 @@ EQUIPMENT_CN = {
 }
 
 def fmt_bodypart(val):
-    cn = BODY_PARTS_CN.get(str(val).lower(), "")
+    cn = BODY_PARTS_CN.get(str(val).strip().lower(), "")
     return f"{cn} ({val})" if cn else str(val).title()
 
 def fmt_target(val):
-    cn = TARGET_MUSCLES_CN.get(str(val).lower(), "")
+    cn = TARGET_MUSCLES_CN.get(str(val).strip().lower(), "")
     return f"{cn} ({val})" if cn else str(val).title()
 
 def fmt_equipment(val):
-    cn = EQUIPMENT_CN.get(str(val).lower(), "")
+    cn = EQUIPMENT_CN.get(str(val).strip().lower(), "")
     return f"{cn} ({val})" if cn else str(val).title()
 
-# ----------------- 数据加载 -----------------
+# ----------------- 数据加载与严格清洗 -----------------
 DATASET_RAW_URL = "https://raw.githubusercontent.com/hasaneyldrm/exercises-dataset/master/data/exercises.json"
 REPO_RAW_BASE = "https://raw.githubusercontent.com/hasaneyldrm/exercises-dataset/master"
 
@@ -124,11 +124,17 @@ def load_exercise_data():
     resp.raise_for_status()
     raw_df = pd.DataFrame(resp.json())
     
+    # 统一字段名
     if 'bodyPart' in raw_df.columns and 'body_part' not in raw_df.columns:
         raw_df['body_part'] = raw_df['bodyPart']
     if 'secondaryMuscles' in raw_df.columns and 'secondary_muscles' not in raw_df.columns:
         raw_df['secondary_muscles'] = raw_df['secondaryMuscles']
-        
+    
+    # 关键清洗：统一小写并剔除首尾不可见字符
+    for col in ['equipment', 'body_part', 'target']:
+        if col in raw_df.columns:
+            raw_df[col] = raw_df[col].astype(str).str.strip().str.lower()
+            
     return raw_df
 
 try:
@@ -147,7 +153,6 @@ tab_explore, tab_custom_plan, tab_weekly_plan = st.tabs([
     "📅 自动生成一周均衡课表"
 ])
 
-# 动作渲染辅助函数
 def render_exercise_card(row, col):
     with col:
         st.subheader(str(row.get('name', '')).title())
@@ -191,20 +196,20 @@ def render_exercise_card(row, col):
 # ==============================================================================
 with tab_explore:
     st.sidebar.header("🔍 动作库筛选")
-    search_query = st.sidebar.text_input("动作名称关键词", placeholder="如: squat, bench, curl...")
+    search_query = st.sidebar.text_input("动作名称关键词", placeholder="如: squat, bench, push up...")
 
-    all_targets = sorted(list(df['target'].dropna().unique())) if 'target' in df.columns else []
+    all_targets = sorted([t for t in df['target'].dropna().unique() if t])
     selected_targets = st.sidebar.multiselect("🎯 目标肌群", options=all_targets, format_func=fmt_target)
 
-    all_bodyparts = sorted(list(df['body_part'].dropna().unique())) if 'body_part' in df.columns else []
+    all_bodyparts = sorted([b for b in df['body_part'].dropna().unique() if b])
     selected_bodyparts = st.sidebar.multiselect("🧍 身体部位", options=all_bodyparts, format_func=fmt_bodypart)
 
-    all_equipments = sorted(list(df['equipment'].dropna().unique())) if 'equipment' in df.columns else []
+    all_equipments = sorted([e for e in df['equipment'].dropna().unique() if e])
     selected_equipments = st.sidebar.multiselect("⚙️ 训练器械", options=all_equipments, format_func=fmt_equipment)
 
     filtered_df = df.copy()
     if search_query:
-        filtered_df = filtered_df[filtered_df['name'].str.contains(search_query, case=False, na=False)]
+        filtered_df = filtered_df[filtered_df['name'].str.contains(search_query.strip(), case=False, na=False)]
     if selected_targets:
         filtered_df = filtered_df[filtered_df['target'].isin(selected_targets)]
     if selected_bodyparts:
@@ -214,9 +219,9 @@ with tab_explore:
 
     col1, col2, col3, col4 = st.columns(4)
     with col1: st.metric("筛选动作数", len(filtered_df))
-    with col2: st.metric("涵盖肌群", filtered_df['target'].nunique() if 'target' in filtered_df.columns else 0)
-    with col3: st.metric("身体部位", filtered_df['body_part'].nunique() if 'body_part' in filtered_df.columns else 0)
-    with col4: st.metric("器械种类", filtered_df['equipment'].nunique() if 'equipment' in filtered_df.columns else 0)
+    with col2: st.metric("涵盖肌群", filtered_df['target'].nunique())
+    with col3: st.metric("身体部位", filtered_df['body_part'].nunique())
+    with col4: st.metric("器械种类", filtered_df['equipment'].nunique())
     st.divider()
 
     if filtered_df.empty:
@@ -244,7 +249,7 @@ with tab_explore:
 # ==============================================================================
 with tab_custom_plan:
     st.subheader("⚡ 单日个性化训练课表生成器")
-    st.caption("选择训练模式、部位、可用器械与动作数量，系统将自动从库中抽样构建结构化训练清单。")
+    st.caption("选择训练模式、部位、可用器械与动作数量，系统将严格按照器械限制从库中筛选。")
     
     col_t1, col_t2 = st.columns(2)
     with col_t1:
@@ -266,7 +271,7 @@ with tab_custom_plan:
         action_count = st.slider("2. 挑选动作数量 (个)", min_value=3, max_value=10, value=5)
         
     with col_t2:
-        avail_equipments = sorted(list(df['equipment'].dropna().unique()))
+        avail_equipments = sorted([e for e in df['equipment'].dropna().unique() if e])
         selected_plan_equipments = st.multiselect(
             "3. 选择可用器械种类 (默认留空代表支持全部器械)",
             options=avail_equipments,
@@ -278,7 +283,6 @@ with tab_custom_plan:
             options=["肌肥大增肌 (4 组 x 8-12 次)", "力量主导 (5 组 x 5 次)", "肌耐力 / 减脂循环 (3 组 x 15-20 次)"]
         )
 
-    # 映射训练部位与 target
     split_mapping = {
         "三分化 - 推 (Push: 胸/肩/肱三头)": {"targets": ["pectorals", "delts", "triceps", "serratus anterior"], "body_parts": ["chest", "shoulders", "upper arms"]},
         "三分化 - 拉 (Pull: 背/肱二头/后束)": {"targets": ["lats", "upper back", "traps", "biceps", "forearms", "spine"], "body_parts": ["back", "upper arms", "lower arms"]},
@@ -293,27 +297,26 @@ with tab_custom_plan:
     }
 
     if st.button("🎲 立即生成训练课表", type="primary"):
-        pool_df = df.copy()
-        
-        # 1. 器械筛选
+        # 1. 严格器械硬过滤
         if selected_plan_equipments:
-            pool_df = pool_df[pool_df['equipment'].isin(selected_plan_equipments)]
+            pool_df = df[df['equipment'].isin(selected_plan_equipments)].copy()
+        else:
+            pool_df = df.copy()
             
-        # 2. 部位匹配
+        # 2. 部位软匹配过滤
         condition = split_mapping[split_type]
         if condition["targets"] or condition["body_parts"]:
             match_mask = (pool_df['target'].isin(condition["targets"])) | (pool_df['body_part'].isin(condition["body_parts"]))
             pool_df = pool_df[match_mask]
             
         if pool_df.empty:
-            st.error("抱歉，在所选器械与部位条件下未检索到匹配的动作，请尝试勾选更多可用器械。")
+            st.error("⚠️ 在所选器械与部位条件下未找到匹配动作。若选择徒手，请确认该部位库中是否有纯自重动作，或增加其他可选器械。")
         else:
             sample_size = min(action_count, len(pool_df))
             sampled_df = pool_df.sample(n=sample_size, random_state=random.randint(1, 9999))
             
             st.success(f"🎉 成功生成专属训练课表！包含 **{sample_size}** 个精选动作（配置建议：{sets_reps_style}）")
             
-            # 卡片展示
             cols_per_row = 3
             for r_i in range(0, len(sampled_df), cols_per_row):
                 row_slice = sampled_df.iloc[r_i:r_i + cols_per_row]
@@ -327,26 +330,22 @@ with tab_custom_plan:
 # ==============================================================================
 with tab_weekly_plan:
     st.subheader("📅 自动生成一周均衡课表 (Weekly Workout Routine)")
-    st.caption("科学排布推、拉、腿及全身各肌群负荷，自动生成周度训练计划表。")
+    st.caption("按选定器械条件，自动科学排布每周各肌群负荷。")
     
     col_w1, col_w2 = st.columns(2)
     with col_w1:
-        weekly_days = st.select_slider(
-            "1. 每周训练天数",
-            options=[3, 4, 5, 6],
-            value=4
-        )
-        actions_per_day = st.slider("2. 每日动作数量", min_value=4, max_value=8, value=5)
+        weekly_days = st.select_slider("1. 每周训练天数", options=[3, 4, 5, 6], value=4)
+        actions_per_day = st.slider("2. 每日动作数量", min_value=3, max_value=8, value=5)
     with col_w2:
+        all_equipments_clean = sorted([e for e in df['equipment'].dropna().unique() if e])
         weekly_equipments = st.multiselect(
             "3. 健身房/家庭可用器械 (留空代表全部器械)",
-            options=all_equipments,
+            options=all_equipments_clean,
             format_func=fmt_equipment,
             key="weekly_equip",
             default=[]
         )
     
-    # 预设周计划架构
     weekly_structures = {
         3: [
             ("Day 1: 推力主导日 (Push Day)", ["pectorals", "delts", "triceps"], ["chest", "shoulders"]),
@@ -364,7 +363,7 @@ with tab_weekly_plan:
             ("Day 2: 背部与肱二头 (Back & Biceps)", ["lats", "upper back", "traps", "biceps"], ["back", "upper arms"]),
             ("Day 3: 腿部主导日 (Leg Day)", ["quads", "hamstrings", "glutes", "calves"], ["upper legs", "lower legs"]),
             ("Day 4: 肩部与腰腹 (Shoulders & Abs)", ["delts", "abs", "spine"], ["shoulders", "waist"]),
-            ("Day 5: 全身弱项强化/功能性日 (Full Body / Weak Point)", ["pectorals", "lats", "quads", "glutes", "delts"], ["chest", "back", "upper legs"])
+            ("Day 5: 全身弱项强化/功能性日 (Full Body)", ["pectorals", "lats", "quads", "glutes", "delts"], ["chest", "back", "upper legs"])
         ],
         6: [
             ("Day 1: Push A (推力 力量)", ["pectorals", "delts", "triceps"], ["chest", "shoulders"]),
@@ -377,6 +376,12 @@ with tab_weekly_plan:
     }
 
     if st.button("🚀 生成整周课表", type="primary"):
+        # 全局基础器械池硬过滤
+        if weekly_equipments:
+            base_equipment_pool = df[df['equipment'].isin(weekly_equipments)].copy()
+        else:
+            base_equipment_pool = df.copy()
+
         plan_structure = weekly_structures[weekly_days]
         markdown_export = f"# 🏋️‍♂️ 每周 {weekly_days} 天训练计划表\n\n"
         
@@ -386,20 +391,16 @@ with tab_weekly_plan:
             st.markdown(f"<div class='workout-day-box'><h4>📌 {day_title}</h4></div>", unsafe_allow_html=True)
             markdown_export += f"## {day_title}\n"
             
-            day_pool = df.copy()
-            if weekly_equipments:
-                day_pool = day_pool[day_pool['equipment'].isin(weekly_equipments)]
-                
-            mask = (day_pool['target'].isin(target_list)) | (day_pool['body_part'].isin(bp_list))
-            day_pool = day_pool[mask]
+            # 严格从器械池中做部位匹配
+            mask = (base_equipment_pool['target'].isin(target_list)) | (base_equipment_pool['body_part'].isin(bp_list))
+            day_pool = base_equipment_pool[mask]
             
             if day_pool.empty:
-                st.warning(f"{day_title} 在指定器械下无匹配动作。")
+                st.warning(f"{day_title}：在所选器械（{', '.join([fmt_equipment(e) for e in weekly_equipments]) if weekly_equipments else '全部'}）下未找到匹配动作。")
             else:
                 sample_count = min(actions_per_day, len(day_pool))
                 day_sampled = day_pool.sample(n=sample_count, random_state=random.randint(1, 9999))
                 
-                # 渲染横向简易列表与动图预览
                 d_cols = st.columns(sample_count)
                 for idx, (_, row) in enumerate(day_sampled.iterrows()):
                     with d_cols[idx]:
@@ -416,7 +417,6 @@ with tab_weekly_plan:
             markdown_export += "\n"
             st.divider()
 
-        # 导出下载课表
         st.download_button(
             label="📥 下载整周课表 (Markdown 文本格式)",
             data=markdown_export,
