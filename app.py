@@ -1,339 +1,188 @@
 import streamlit as st
 import pandas as pd
-import requests
-import random
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from scipy.interpolate import CubicSpline
+from scipy.signal import welch
+import io
 
-st.set_page_config(
-    page_title="Fitness Exercise & Plan Explorer",
-    page_icon="🏋️‍♂️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+integrate_func = getattr(np, 'trapezoid', getattr(np, 'trapz', None))
 
-# 自定义样式
-st.markdown("""
-<style>
-    .badge {
-        display: inline-block;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-size: 12px;
-        font-weight: 600;
-        margin-right: 6px;
-        margin-bottom: 4px;
-    }
-    .badge-target { background-color: #e3f2fd; color: #1565c0; }
-    .badge-bodypart { background-color: #f3e5f5; color: #7b1fa2; }
-    .badge-equipment { background-color: #e8f5e9; color: #2e7d32; }
-    .workout-day-box {
-        background-color: #f8f9fa;
-        border-left: 5px solid #2e7d32;
-        padding: 12px 16px;
-        border-radius: 6px;
-        margin-bottom: 12px;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# ----------------- 中英对照字典 -----------------
-BODY_PARTS_CN = {
-    "back": "背部", "cardio": "有氧心肺", "chest": "胸部",
-    "lower arms": "小臂 / 前臂", "lower legs": "小腿", "neck": "颈部",
-    "shoulders": "肩部", "upper arms": "大臂 / 上臂", "upper legs": "大腿",
-    "waist": "腰腹核心"
-}
-
-TARGET_MUSCLES_CN = {
-    "abductors": "髋外展肌群", "abs": "腹肌", "adductors": "髋内收肌群",
-    "biceps": "肱二头肌", "calves": "小腿肌群", "cardiovascular system": "心血管系统",
-    "delts": "三角肌", "forearms": "前臂肌群", "glutes": "臀大肌 / 臀部",
-    "hamstrings": "腘绳肌 (大腿后侧)", "lats": "背阔肌", "levator scapulae": "肩胛提肌",
-    "pectorals": "胸大肌", "quads": "股四头肌 (大腿前侧)", "serratus anterior": "前锯肌",
-    "spine": "脊柱肌群", "traps": "斜方肌", "triceps": "肱三头肌", "upper back": "上背部"
-}
-
-EQUIPMENT_CN = {
-    "assisted": "辅助器械", "band": "弹力带", "barbell": "杠铃",
-    "body weight": "徒手 / 自重", "bosu ball": "BOSU 半圆平衡球", "cable": "龙门架 / 绳索",
-    "dumbbell": "哑铃", "elliptical machine": "椭圆机", "ez barbell": "EZ 曲柄杠铃",
-    "hammer": "铁锤 / 训练锤", "kettlebell": "壶铃", "leverage machine": "杠杆器械",
-    "medicine ball": "药球", "olympic barbell": "奥林匹克杠铃", "resistance band": "阻力带",
-    "roller": "泡沫轴 / 滚轮", "rope": "战绳 / 跳绳", "skierg machine": "滑雪机",
-    "sled machine": "负重雪橇", "smith machine": "史密斯机", "stability ball": "瑞士球 / 健身球",
-    "stationary bike": "动感单车", "stepmill machine": "楼梯机", "tire": "重型轮胎",
-    "trap bar": "六角杠铃", "upper body ergometer": "手摇车", "weighted": "负重加重",
-    "wheel roller": "健腹轮"
-}
-
-def fmt_bodypart(val):
-    return f"{BODY_PARTS_CN.get(str(val).lower(), '')} ({val})" if str(val).lower() in BODY_PARTS_CN else str(val).title()
-
-def fmt_target(val):
-    return f"{TARGET_MUSCLES_CN.get(str(val).lower(), '')} ({val})" if str(val).lower() in TARGET_MUSCLES_CN else str(val).title()
-
-def fmt_equipment(val):
-    return f"{EQUIPMENT_CN.get(str(val).lower(), '')} ({val})" if str(val).lower() in EQUIPMENT_CN else str(val).title()
-
-# ----------------- 数据加载与标准化 -----------------
-DATASET_RAW_URL = "https://raw.githubusercontent.com/hasaneyldrm/exercises-dataset/master/data/exercises.json"
-REPO_RAW_BASE = "https://raw.githubusercontent.com/hasaneyldrm/exercises-dataset/master"
-
-@st.cache_data(ttl=3600)
-def load_exercise_data():
-    resp = requests.get(DATASET_RAW_URL, timeout=15)
-    resp.raise_for_status()
-    raw_df = pd.DataFrame(resp.json())
+def calc_dfa_alpha1(rr):
+    """計算 DFA Alpha 1 (短時間尺度非線性相關性)"""
+    # 短期尺度 n 通常定義為 4 到 16，至少需要確保有足夠的心跳樣本(約3-4倍的最大n值)
+    if len(rr) < 48:
+        return np.nan
+        
+    y = np.cumsum(rr - np.mean(rr))
+    n_vals = np.arange(4, 17)
+    F_n = np.zeros(len(n_vals))
     
-    # 统一字段
-    if 'bodyPart' in raw_df.columns and 'body_part' not in raw_df.columns:
-        raw_df['body_part'] = raw_df['bodyPart']
-    if 'secondaryMuscles' in raw_df.columns and 'secondary_muscles' not in raw_df.columns:
-        raw_df['secondary_muscles'] = raw_df['secondaryMuscles']
-        
-    for col in ['equipment', 'body_part', 'target', 'name']:
-        if col in raw_df.columns:
-            raw_df[col] = raw_df[col].astype(str).str.strip().str.lower()
+    for i, n in enumerate(n_vals):
+        n_boxes = len(y) // n
+        if n_boxes == 0:
+            continue
             
-    return raw_df
+        y_boxes = y[:n_boxes * n].reshape((n_boxes, n))
+        x = np.arange(1, n + 1)
+        
+        # 對每個 box 進行線性擬合 (detrend)
+        coefs = np.polyfit(x, y_boxes.T, 1)
+        y_trend = np.outer(x, coefs[0]) + coefs[1]
+        
+        # 計算均方根波動
+        F_n[i] = np.sqrt(np.mean((y_boxes.T - y_trend)**2))
+        
+    valid = F_n > 0
+    if np.sum(valid) > 2:
+        # 在 log-log 座標上計算斜率
+        coeffs = np.polyfit(np.log10(n_vals[valid]), np.log10(F_n[valid]), 1)
+        return coeffs[0]
+    return np.nan
 
-try:
-    with st.spinner("正在加载运动数据库..."):
-        df = load_exercise_data()
-except Exception as e:
-    st.error(f"加载数据集失败: {e}")
-    st.stop()
+st.set_page_config(page_title="進階 HRV (時/頻/非線性) 分析工具", layout="wide")
+st.title("HRV & HR 連續時間軸分析工具 (含 LF/HF & DFA α1)")
+st.markdown("針對帶有精確時間戳記 `Time,RRI,...` 的 CSV 檔案進行解析，新增非線性碎形特徵 DFA α1 追蹤。")
 
-# 动作卡片渲染
-def render_exercise_card(row, col):
-    with col:
-        st.subheader(str(row.get('name', '')).title())
-        media_path = row.get('gif_url') or row.get('gifUrl') or row.get('image') or ''
-        if media_path:
-            media_url = media_path if str(media_path).startswith("http") else f"{REPO_RAW_BASE}/{str(media_path).lstrip('/')}"
-            st.image(media_url, use_container_width=True)
-        else:
-            st.info("暂无动图")
+st.sidebar.header("演算法參數設定")
+window_size_sec = st.sidebar.slider("滑動視窗大小 (秒)", 60, 300, 120, 10, help="LF與DFA建議至少 120 秒")
+step_sec = st.sidebar.number_input("滑動步伐 (秒)", min_value=1.0, value=1.0)
+rri_min = st.sidebar.number_input("RRI 生理下限 (ms)", value=300)
+rri_max = st.sidebar.number_input("RRI 生理上限 (ms)", value=2000)
+
+uploaded_file = st.file_uploader("上傳 HRV 資料檔 (CSV)", type=["csv"])
+
+if uploaded_file is not None:
+    content = uploaded_file.getvalue().decode("utf-8").splitlines()
+    header_idx = 0
+    for i, line in enumerate(content):
+        if "Time" in line and "RRI" in line:
+            header_idx = i
+            break
             
-        st.markdown(f"""
-        <div>
-            <span class="badge badge-target">🎯 {fmt_target(row.get('target', ''))}</span>
-            <span class="badge badge-bodypart">🧍 {fmt_bodypart(row.get('body_part', ''))}</span>
-            <span class="badge badge-equipment">⚙️ {fmt_equipment(row.get('equipment', ''))}</span>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        instructions = row.get('instructions')
-        if isinstance(instructions, list) and len(instructions) > 0:
-            with st.expander("📖 动作要领"):
-                for step_i, step_text in enumerate(instructions, 1):
-                    st.markdown(f"**{step_i}.** {step_text}")
-        st.markdown("<br>", unsafe_allow_html=True)
-
-# ----------------- 页面主体 -----------------
-st.title("🏋️‍♂️ 智能健身工坊：动作库与课表生成器")
-
-tab_explore, tab_custom_plan, tab_weekly_plan = st.tabs([
-    "🔍 动作检索库", 
-    "⚡ 单日定制课表生成", 
-    "📅 自动生成一周均衡课表"
-])
-
-# 获取纯净的器械列表供所有 tab 使用
-all_equipments = sorted([e for e in df['equipment'].dropna().unique() if e])
-
-# ==============================================================================
-# TAB 1: 动作检索库 (原本正常的逻辑保留)
-# ==============================================================================
-with tab_explore:
-    st.sidebar.header("🔍 动作库筛选")
-    search_query = st.sidebar.text_input("动作名称关键词", placeholder="如: squat, bench, curl...")
-
-    all_targets = sorted([t for t in df['target'].dropna().unique() if t])
-    selected_targets = st.sidebar.multiselect("🎯 目标肌群", options=all_targets, format_func=fmt_target)
-
-    all_bodyparts = sorted([b for b in df['body_part'].dropna().unique() if b])
-    selected_bodyparts = st.sidebar.multiselect("🧍 身体部位", options=all_bodyparts, format_func=fmt_bodypart)
-
-    selected_equipments = st.sidebar.multiselect("⚙️ 训练器械", options=all_equipments, format_func=fmt_equipment)
-
-    filtered_df = df.copy()
-    if search_query:
-        filtered_df = filtered_df[filtered_df['name'].str.contains(search_query.strip(), case=False, na=False)]
-    if selected_targets:
-        filtered_df = filtered_df[filtered_df['target'].isin(selected_targets)]
-    if selected_bodyparts:
-        filtered_df = filtered_df[filtered_df['body_part'].isin(selected_bodyparts)]
-    if selected_equipments:
-        filtered_df = filtered_df[filtered_df['equipment'].isin(selected_equipments)]
-
-    col1, col2, col3, col4 = st.columns(4)
-    with col1: st.metric("筛选动作数", len(filtered_df))
-    with col2: st.metric("涵盖肌群", filtered_df['target'].nunique())
-    with col3: st.metric("身体部位", filtered_df['body_part'].nunique())
-    with col4: st.metric("器械种类", filtered_df['equipment'].nunique())
-    st.divider()
-
-    if filtered_df.empty:
-        st.info("未找到符合条件的动作。")
-    else:
-        PAGE_SIZE = 9
-        total_pages = max(1, (len(filtered_df) - 1) // PAGE_SIZE + 1)
-        p1, p2 = st.columns([1, 4])
-        with p1: page_number = st.number_input("页码", min_value=1, max_value=total_pages, value=1, step=1, key="explore_page")
-        with p2: st.write(f"共 **{len(filtered_df)}** 个动作 | 第 **{page_number}** / **{total_pages}** 页")
-
-        start_idx = (page_number - 1) * PAGE_SIZE
-        page_data = filtered_df.iloc[start_idx:start_idx + PAGE_SIZE]
-        
-        cols_per_row = 3
-        for r_i in range(0, len(page_data), cols_per_row):
-            row_slice = page_data.iloc[r_i:r_i + cols_per_row]
-            grid_cols = st.columns(cols_per_row)
-            for c_idx, (_, row) in enumerate(row_slice.iterrows()):
-                render_exercise_card(row, grid_cols[c_idx])
-
-
-# ==============================================================================
-# TAB 2: 单日定制课表生成 (纯净硬过滤)
-# ==============================================================================
-with tab_custom_plan:
-    st.subheader("⚡ 单日个性化训练课表生成器")
+    df_raw = pd.read_csv(io.StringIO("\n".join(content[header_idx:])))
     
-    col_t1, col_t2 = st.columns(2)
-    with col_t1:
-        split_type = st.selectbox(
-            "1. 选择主要训练部位 / 循环训练",
-            options=[
-                "胸部 (Chest)",
-                "背部 (Back)",
-                "腿部 (Legs)",
-                "全身循环训练 (Full Body Circuit)"
-            ]
-        )
-        action_count = st.slider("2. 动作数量 (个)", min_value=3, max_value=8, value=4)
+    if 'Time' not in df_raw.columns or 'RRI' not in df_raw.columns:
+        st.error("CSV 檔案中找不到 'Time' 或 'RRI' 欄位。")
+        st.stop()
         
-    with col_t2:
-        selected_plan_equipments = st.multiselect(
-            "3. 必须使用的器械 (单选或多选)",
-            options=all_equipments,
-            format_func=fmt_equipment,
-            default=["body weight"]  # 默认即为徒手/自重
-        )
-
-    # 部位映射表
-    part_mapping = {
-        "胸部 (Chest)": ["chest"],
-        "背部 (Back)": ["back"],
-        "腿部 (Legs)": ["upper legs", "lower legs"],
-        "全身循环训练 (Full Body Circuit)": []
-    }
-
-    if st.button("🎲 立即生成训练课表", type="primary"):
-        # 步骤 1：先严格按器械筛选（若选了徒手，绝对只有 body weight）
-        if selected_plan_equipments:
-            step1_df = df[df['equipment'].isin(selected_plan_equipments)].copy()
-        else:
-            step1_df = df.copy()
-
-        # 步骤 2：在器械过滤后的池子里，再按身体部位筛选
-        target_parts = part_mapping[split_type]
-        if target_parts:
-            final_pool = step1_df[step1_df['body_part'].isin(target_parts)].copy()
-        else:
-            final_pool = step1_df.copy()
-
-        if final_pool.empty:
-            st.error("⚠️ 该器械下没有找到对应部位的动作，请调整器械选项。")
-        else:
-            sample_size = min(action_count, len(final_pool))
-            sampled_df = final_pool.sample(n=sample_size, random_state=random.randint(1, 9999))
-            
-            st.success(f"🎉 成功生成！已为您严格筛选出 **{sample_size}** 个纯符合器械条件的动作：")
-            
-            cols_per_row = 3
-            for r_i in range(0, len(sampled_df), cols_per_row):
-                row_slice = sampled_df.iloc[r_i:r_i + cols_per_row]
-                grid_cols = st.columns(cols_per_row)
-                for c_idx, (_, row) in enumerate(row_slice.iterrows()):
-                    render_exercise_card(row, grid_cols[c_idx])
-
-
-# ==============================================================================
-# TAB 3: 自动生成一周均衡课表 (纯净硬过滤)
-# ==============================================================================
-with tab_weekly_plan:
-    st.subheader("📅 自动生成一周均衡课表 (兼顾胸、背、腿、全身)")
+    df_raw['RRI'] = pd.to_numeric(df_raw['RRI'], errors='coerce')
     
-    col_w1, col_w2 = st.columns(2)
-    with col_w1:
-        actions_per_day = st.slider("1. 每日动作数量", min_value=3, max_value=6, value=4)
-    with col_w2:
-        weekly_equipments = st.multiselect(
-            "2. 训练器械选择 (单选或多选)",
-            options=all_equipments,
-            format_func=fmt_equipment,
-            default=["body weight"],  # 默认徒手
-            key="weekly_equip_input"
-        )
+    t_str = df_raw['Time'].astype(str).str.strip()
+    t_str = t_str.str.replace(r'\s+(\d+)$', r'.\1', regex=True)
+    dt = pd.to_datetime(t_str, errors='coerce')
     
-    # 均衡的经典周计划划分
-    routine_template = [
-        ("Day 1: 胸部专项 (Chest Day)", ["chest"]),
-        ("Day 2: 背部专项 (Back Day)", ["back"]),
-        ("Day 3: 休息日 (Rest Day)", None),
-        ("Day 4: 腿部专项 (Leg Day)", ["upper legs", "lower legs"]),
-        ("Day 5: 核心与全身循环 (Core & Full Body)", ["waist", "cardio", "chest", "back", "upper legs"]),
-        ("Day 6: 休息日 (Rest Day)", None),
-        ("Day 7: 休息日 (Rest Day)", None)
-    ]
-
-    if st.button("🚀 生成整周课表", type="primary"):
-        # 步骤 1：先全局按器械硬切片
-        if weekly_equipments:
-            base_equipment_pool = df[df['equipment'].isin(weekly_equipments)].copy()
-        else:
-            base_equipment_pool = df.copy()
-
-        markdown_export = "# 🏋️‍♂️ 一周均衡健身课表\n\n"
+    valid_mask = dt.notna() & df_raw['RRI'].notna()
+    df = df_raw[valid_mask].copy()
+    dt_valid = dt[valid_mask]
+    
+    start_dt = dt_valid.iloc[0]
+    
+    secs = dt_valid.dt.hour * 3600 + dt_valid.dt.minute * 60 + dt_valid.dt.second + dt_valid.dt.microsecond / 1e6
+    diffs = secs.diff()
+    crossings = (diffs < -43200).cumsum().fillna(0) * 86400
+    
+    continuous_secs = secs + crossings
+    df['Time_sec'] = continuous_secs - continuous_secs.iloc[0]
+    
+    df = df[(df['RRI'] >= rri_min) & (df['RRI'] <= rri_max)]
+    df = df.sort_values('Time_sec').drop_duplicates(subset=['Time_sec'])
+    
+    if len(df) < 10:
+        st.error(f"有效資料點過少 (僅餘 {len(df)} 筆)。")
+        st.stop()
         
-        for day_title, day_parts in routine_template:
-            st.markdown(f"<div class='workout-day-box'><h4>📌 {day_title}</h4></div>", unsafe_allow_html=True)
-            markdown_export += f"## {day_title}\n"
+    df['RRI_diff'] = df['RRI'].diff()
+    df['RRI_diff_sq'] = df['RRI_diff'] ** 2
+    df['NN50_flag'] = (df['RRI_diff'].abs() > 50).astype(int)
+    
+    t_raw = df['Time_sec'].values
+    rri_raw = df['RRI'].values
+    fs = 4.0 
+    t_interp = np.arange(t_raw[0], t_raw[-1], 1/fs)
+    cubic_spline = CubicSpline(t_raw, rri_raw, extrapolate=True)
+    rri_interp = cubic_spline(t_interp)
+    
+    results = []
+    progress_bar = st.progress(0)
+    time_points = np.arange(t_raw[0] + window_size_sec, t_raw[-1], step_sec)
+    
+    for i, current_t in enumerate(time_points):
+        if i % 10 == 0:
+            progress_bar.progress((i + 1) / len(time_points))
             
-            # 休息日直接跳过抽样
-            if day_parts is None:
-                st.write("💤 安排休息与机能恢复。")
-                markdown_export += "- 充分休息与拉伸放松\n\n"
-                st.divider()
-                continue
+        win_mask = (df['Time_sec'] > current_t - window_size_sec) & (df['Time_sec'] <= current_t)
+        df_win = df[win_mask]
+        
+        if len(df_win) < 10:
+            continue
             
-            # 步骤 2：在器械库中严格筛选对应的 body_part
-            day_pool = base_equipment_pool[base_equipment_pool['body_part'].isin(day_parts)]
+        hr = 60000.0 / df_win['RRI'].mean()
+        sdnn = df_win['RRI'].std()
+        rmssd = np.sqrt(df_win['RRI_diff_sq'].mean())
+        pnn50 = df_win['NN50_flag'].mean() * 100
+        
+        # 計算 DFA Alpha 1 (直接使用原始未插值、去除極端值的 RRI 序列)
+        alpha1 = calc_dfa_alpha1(df_win['RRI'].values)
+        
+        win_interp_mask = (t_interp > current_t - window_size_sec) & (t_interp <= current_t)
+        win_rri_interp = rri_interp[win_interp_mask]
+        
+        if len(win_rri_interp) >= int(window_size_sec * fs * 0.8):
+            win_rri_detrend = win_rri_interp - np.mean(win_rri_interp)
+            f_psd, pxx = welch(win_rri_detrend, fs=fs, nperseg=len(win_rri_detrend))
+            idx_lf = np.where((f_psd >= 0.04) & (f_psd <= 0.15))[0]
+            idx_hf = np.where((f_psd >= 0.15) & (f_psd <= 0.40))[0]
+            lf = integrate_func(pxx[idx_lf], f_psd[idx_lf]) if len(idx_lf) > 0 else np.nan
+            hf = integrate_func(pxx[idx_hf], f_psd[idx_hf]) if len(idx_hf) > 0 else np.nan
+        else:
+            lf, hf = np.nan, np.nan
             
-            if day_pool.empty:
-                st.warning(f"在选定器械中未找到对应部位的动作。")
-            else:
-                sample_count = min(actions_per_day, len(day_pool))
-                day_sampled = day_pool.sample(n=sample_count, random_state=random.randint(1, 9999))
-                
-                d_cols = st.columns(sample_count)
-                for idx, (_, row) in enumerate(day_sampled.iterrows()):
-                    with d_cols[idx]:
-                        st.markdown(f"**{idx+1}. {str(row['name']).title()}**")
-                        st.caption(f"{fmt_bodypart(row.get('body_part',''))} | {fmt_equipment(row.get('equipment',''))}")
-                        media_path = row.get('gif_url') or row.get('gifUrl') or row.get('image') or ''
-                        if media_path:
-                            media_url = media_path if str(media_path).startswith("http") else f"{REPO_RAW_BASE}/{str(media_path).lstrip('/')}"
-                            st.image(media_url, use_container_width=True)
-                            
-                    markdown_export += f"- {str(row['name']).title()} ({fmt_bodypart(row.get('body_part',''))} / {fmt_equipment(row.get('equipment',''))})\n"
-            
-            markdown_export += "\n"
-            st.divider()
+        current_dt = start_dt + pd.Timedelta(seconds=float(current_t))
+        
+        results.append({
+            'Datetime': current_dt,
+            'Time_str': current_dt.strftime('%H:%M:%S'),
+            'HR': hr, 'SDNN': sdnn, 'RMSSD': rmssd, 'pNN50': pnn50,
+            'LF': lf, 'HF': hf, 'Alpha1': alpha1
+        })
+        
+    progress_bar.empty()
+    calc_df = pd.DataFrame(results).dropna(subset=['HR', 'RMSSD'])
+    st.success(f"✅ 計算完成！基於真實時間軸，共產生 **{len(calc_df)}** 個特徵點。")
+    
+    fig = make_subplots(rows=6, cols=1, shared_xaxes=True, 
+                        vertical_spacing=0.03,
+                        subplot_titles=("心率 (HR)", "RMSSD", "SDNN", "pNN50", "頻域功率 (LF & HF)", "DFA Alpha 1 (短尺度非線性動態)"))
 
-        st.download_button(
-            label="📥 下载整周课表 (Markdown 文本)",
-            data=markdown_export,
-            file_name="weekly_routine.md",
-            mime="text/markdown"
-        )
+    fig.add_trace(go.Scatter(x=calc_df['Datetime'], y=calc_df['HR'], mode='lines', name='HR', line=dict(color='#EF553B')), row=1, col=1)
+    fig.add_trace(go.Scatter(x=calc_df['Datetime'], y=calc_df['RMSSD'], mode='lines', name='RMSSD', line=dict(color='#00CC96')), row=2, col=1)
+    fig.add_trace(go.Scatter(x=calc_df['Datetime'], y=calc_df['SDNN'], mode='lines', name='SDNN', line=dict(color='#AB63FA')), row=3, col=1)
+    fig.add_trace(go.Scatter(x=calc_df['Datetime'], y=calc_df['pNN50'], mode='lines', name='pNN50', line=dict(color='#FFA15A')), row=4, col=1)
+    
+    fig.add_trace(go.Scatter(x=calc_df['Datetime'], y=calc_df['LF'], mode='lines', name='LF', line=dict(color='#FF97FF')), row=5, col=1)
+    fig.add_trace(go.Scatter(x=calc_df['Datetime'], y=calc_df['HF'], mode='lines', name='HF', line=dict(color='#19D3F3')), row=5, col=1)
+    
+    fig.add_trace(go.Scatter(x=calc_df['Datetime'], y=calc_df['Alpha1'], mode='lines', name='DFA α1', line=dict(color='#FFD700')), row=6, col=1)
+
+    fig.update_layout(height=1200, hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                      title_text=f"HRV 連續追蹤分析 (滑動視窗: {window_size_sec}s)")
+    
+    fig.update_yaxes(title_text="bpm", row=1, col=1)
+    for i in range(2, 4): fig.update_yaxes(title_text="ms", row=i, col=1)
+    fig.update_yaxes(title_text="%", row=4, col=1)
+    fig.update_yaxes(title_text="ms²", row=5, col=1)
+    fig.update_yaxes(title_text="α1", range=[0, 2], row=6, col=1) 
+    
+    fig.update_xaxes(title_text="真實時間", tickformat="%H:%M:%S", row=6, col=1)
+
+    st.plotly_chart(fig, use_container_width=True)
+    
+    export_df = calc_df.drop(columns=['Datetime']).rename(columns={'Time_str': 'Time'})
+    st.download_button(
+        label="下載計算結果 (CSV)",
+        data=export_df.to_csv(index=False).encode('utf-8'),
+        file_name='hrv_features_real_time_with_dfa.csv',
+        mime='text/csv'
+    )
